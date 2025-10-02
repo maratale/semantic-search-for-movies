@@ -20,9 +20,27 @@ Env:
 
 import os, sys, argparse, textwrap, json
 import pandas as pd
-from openai import OpenAI
-api_key = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=api_key)   # <-- это и даёт NameError при импорте
+import os
+
+def _get_api_key():
+    key = os.getenv("OPENAI_API_KEY")
+    if not key:
+        # если приложение в Streamlit Cloud — ключ можно хранить в secrets
+        try:
+            import streamlit as st
+            key = st.secrets.get("OPENAI_API_KEY", None) if hasattr(st, "secrets") else None
+        except Exception:
+            pass
+    return key
+
+def _make_client():
+    key = _get_api_key()
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY is not set (env or st.secrets).")
+    # импортируем здесь, а не на уровне модуля
+    from openai import OpenAI
+    return OpenAI(api_key=key)
+
 
 # --------- Try to import your retrieval ----------
 try:
@@ -99,40 +117,36 @@ def _get_api_key():
     return key
 
 def call_openai(prompt: str, system: str = SYS_PROMPT, model: str = "gpt-4o-mini") -> str:
-    api_key = _get_api_key()
-    if not api_key:
-        return "[LLM disabled] Set OPENAI_API_KEY to enable generation.\n\n" + prompt
-
-    # Сначала пытаемся новый SDK (>=1.0), потом фолбэк на старый (0.x)
+    # сначала пробуем новый SDK (>=1.0)
     try:
-        from openai import OpenAI  # новый SDK
-        client = OpenAI(api_key=api_key)
+        client = _make_client()
         r = client.chat.completions.create(
             model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
-            ],
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": prompt}],
             temperature=0.4,
             max_tokens=900,
         )
         return r.choices[0].message.content.strip()
     except Exception as e_new:
+        # фолбэк на старый SDK (0.x), если вдруг он в окружении
         try:
-            import openai  # старый SDK 0.x
-            openai.api_key = api_key
+            import openai
+            key = _get_api_key()
+            if not key:
+                return "[LLM disabled] Set OPENAI_API_KEY to enable generation.\n\n" + prompt
+            openai.api_key = key
             r = openai.ChatCompletion.create(
                 model=model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": prompt},
-                ],
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": prompt}],
                 temperature=0.4,
                 max_tokens=900,
             )
             return r["choices"][0]["message"]["content"].strip()
         except Exception as e_old:
             return f"[OpenAI error] {e_new or e_old}\n\n" + prompt
+
 
 
 # --------- Retrieval wrapper ----------
