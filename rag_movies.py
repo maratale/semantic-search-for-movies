@@ -102,23 +102,6 @@ USER_PROMPT_TMPL = """Запрос пользователя:
 Если контекст не покрывает запрос, честно скажи это и предложи ближайшие варианты из контекста.
 """
 
-# --------- LLM backends ----------
-import os
-
-def _get_api_key():
-    # читаем из env, а если в Streamlit — ещё и из secrets
-    key = os.getenv("OPENAI_API_KEY")
-    if not key:
-        try:
-            import streamlit as st  # доступно только в рантайме Streamlit
-            key = st.secrets.get("OPENAI_API_KEY", None) if hasattr(st, "secrets") else None
-        except Exception:
-            pass
-    return key
-
-
-
-
 # --------- Retrieval wrapper ----------
 def retrieve(index_dir: str, query: str, k: int = 12) -> pd.DataFrame:
     if retr and hasattr(retr, "run_query"):
