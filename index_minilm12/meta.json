@@ -1,0 +1,5 @@
+{
+  "metric": "cosine",
+  "use_faiss": true,
+  "dim": 384
+}
