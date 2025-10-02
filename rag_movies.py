@@ -207,6 +207,7 @@ def cmd_app(args):
     st.caption("build: 2025-10-02T18:45Z")
 
 # ---------- main ----------
+# ---------- main ----------
 def main():
     ap = argparse.ArgumentParser(description="RAG over movie search")
     sub = ap.add_subparsers(dest="cmd")
@@ -224,14 +225,15 @@ def main():
     ap_s.set_defaults(func=cmd_app)
 
     args, _ = ap.parse_known_args()
+
+    # ВАЖНО: если команд нет — всегда запускаем UI с дефолтами.
     if args.cmd is None:
-        # Если запущено через streamlit run, передаём управление UI
-        if any(x.endswith("streamlit") or x == "streamlit" for x in sys.argv[0:2]):
-            args = argparse.Namespace(cmd="app", index="./index_hybrid")
-            cmd_app(args)
-            return
-        ap.print_help(); sys.exit(0)
+        args = argparse.Namespace(cmd="app", index="./index_hybrid")
+        cmd_app(args)
+        return
+
     args.func(args)
 
 if __name__ == "__main__":
     main()
+
