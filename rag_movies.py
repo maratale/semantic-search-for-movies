@@ -17,6 +17,7 @@ Usage:
 Env:
   OPENAI_API_KEY must be set for OpenAI backend.
 """
+print("RAG build stamp: 2025-10-02T18:25Z")
 
 import os, sys, argparse, textwrap, json
 import pandas as pd
