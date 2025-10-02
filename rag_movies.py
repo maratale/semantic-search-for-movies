@@ -3,30 +3,31 @@
 
 """
 RAG over hybrid movie search.
-- Reuses retrieval from semantic_search_movies.py (your index_hybrid).
-- Builds compact context from top-K hits (title, year, genres, cast, plot, url).
-- Calls an LLM to synthesize an answer: summaries, recs, cross-links.
+- Берёт кандидатов из semantic_search_movies.run_query (ваш гибридный индекс).
+- Собирает компактный контекст (title, year, genres, cast, plot, url).
+- Вызывает LLM для связного ответа: резюме, рекомендации, связи.
 
-Usage:
+Запуск:
   # CLI
   python rag_movies.py answer --index ./index_hybrid --q "ромком в большом городе" --k 8
 
   # Streamlit
   python -m streamlit run rag_movies.py -- app --index ./index_hybrid
 
-Env:
-  OPENAI_API_KEY must be set for OpenAI backend.
+Переменные окружения:
+  OPENAI_API_KEY — для OpenAI backend (в Streamlit Cloud положите в Secrets).
 """
-print("RAG build stamp: 2025-10-02T18:25Z")
 
-import os, sys, argparse, textwrap, json
+print("RAG build stamp: 2025-10-02T18:45Z")
+
+import os, sys, argparse
 import pandas as pd
-import os
 
-def _get_api_key():
+# ---------- API key & client ----------
+def _get_api_key() -> str | None:
     key = os.getenv("OPENAI_API_KEY")
     if not key:
-        # если приложение в Streamlit Cloud — ключ можно хранить в secrets
+        # В Streamlit Cloud ключ можно хранить в Secrets
         try:
             import streamlit as st
             key = st.secrets.get("OPENAI_API_KEY", None) if hasattr(st, "secrets") else None
@@ -37,42 +38,40 @@ def _get_api_key():
 def _make_client():
     key = _get_api_key()
     if not key:
-        raise RuntimeError("OPENAI_API_KEY is not set (env or st.secrets).")
-    # импортируем здесь, а не на уровне модуля
+        raise RuntimeError("OPENAI_API_KEY is not set (env or Streamlit secrets).")
+    # Импорт внутри функции, чтобы модуль грузился даже без openai
     from openai import OpenAI
     return OpenAI(api_key=key)
 
-
-# --------- Try to import your retrieval ----------
+# ---------- Импорт ретривера ----------
 try:
-    import semantic_search_movies as retr  # your file with run_query(...)
-except Exception as e:
+    import semantic_search_movies as retr  # ожидается функция run_query(out_dir, query, k)
+except Exception:
     retr = None
 
-# --------- Minimal utils ----------
+# ---------- Вспомогательные ----------
 def _shorten(s: str, n: int = 550) -> str:
     s = (s or "").strip()
     return s if len(s) <= n else s[:n].rsplit(" ", 1)[0] + "…"
 
-def _as_year(x):
+def _as_year(x) -> str:
     s = str(x or "").strip()
     for ch in "[](){}":
         s = s.replace(ch, "")
-    # keep digits only
-    y = "".join([c for c in s if c.isdigit()])
+    y = "".join(c for c in s if c.isdigit())
     return y[:4] if len(y) >= 4 else s
 
 def _build_context(df: pd.DataFrame, k: int) -> str:
     blocks = []
-    cols = {c for c in df.columns}
-    for i, row in df.head(k).iterrows():
-        title = str(row.get("movie_title","")).strip()
-        year  = _as_year(row.get("release_date",""))
-        cats  = str(row.get("categories","")).strip()
-        actors = str(row.get("actors","")).strip()
-        directors = str(row.get("directors","")).strip()
-        desc = _shorten(str(row.get("description","")))
-        url  = str(row.get("page_url","")).strip()
+    for _, row in df.head(k).iterrows():
+        title = str(row.get("movie_title", "")).strip()
+        year  = _as_year(row.get("release_date", ""))
+        cats  = str(row.get("categories", "")).strip()
+        actors = str(row.get("actors", "")).strip()
+        directors = str(row.get("directors", "")).strip()
+        desc = _shorten(str(row.get("description", "")))
+        url  = str(row.get("page_url", "")).strip()
+
         b = []
         b.append(f"Title: {title}" + (f" ({year})" if year else ""))
         if cats:      b.append(f"Genres: {cats}")
@@ -90,7 +89,7 @@ SYS_PROMPT = (
     "1) Коротко ответь на запрос пользователя (1–2 предложения)\n"
     "2) Подборка 5–10 фильмов с причинами (по 1–2 предложения на фильм)\n"
     "3) Если уместно — предложи альтернативы/подборки\n"
-    "Всегда упоминай год, жанры, можно актёров/режиссёров, добавляй ссылки если есть.\n"
+    "Всегда указывай год, жанры, можно актёров/режиссёров; добавляй ссылки, если есть.\n"
 )
 
 USER_PROMPT_TMPL = """Запрос пользователя:
@@ -103,22 +102,54 @@ USER_PROMPT_TMPL = """Запрос пользователя:
 Если контекст не покрывает запрос, честно скажи это и предложи ближайшие варианты из контекста.
 """
 
-# --------- Retrieval wrapper ----------
+# ---------- Вызов LLM ----------
+def call_openai(prompt: str, system: str = SYS_PROMPT, model: str = "gpt-4o-mini") -> str:
+    # основной путь: новый SDK (openai>=1.x)
+    try:
+        client = _make_client()
+        r = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": prompt}],
+            temperature=0.4,
+            max_tokens=900,
+        )
+        return r.choices[0].message.content.strip()
+    except Exception as e_new:
+        # фолбэк: старый SDK (openai 0.x), если он внезапно в окружении
+        try:
+            import openai
+            key = _get_api_key()
+            if not key:
+                return f"[LLM disabled] {e_new}\n\n" + prompt
+            openai.api_key = key
+            r = openai.ChatCompletion.create(
+                model=model,
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": prompt}],
+                temperature=0.4,
+                max_tokens=900,
+            )
+            return r["choices"][0]["message"]["content"].strip()
+        except Exception as e_old:
+            return f"[OpenAI error] {e_old}\n\n" + prompt
+
+# ---------- Ретривер-обёртка ----------
 def retrieve(index_dir: str, query: str, k: int = 12) -> pd.DataFrame:
     if retr and hasattr(retr, "run_query"):
+        # ожидается сигнатура run_query(out_dir, query, k=...)
         return retr.run_query(index_dir, query, k=k)
-    # fallback: minimal retrieval without heavy deps (not ideal)
+    # fallback: очень простой поиск по подстроке, если индекс не собран/нет зависимостей
     meta_path = os.path.join(index_dir, "meta.parquet")
     if not os.path.exists(meta_path):
         raise FileNotFoundError(f"No meta.parquet in {index_dir}; build your index first.")
     df = pd.read_parquet(meta_path)
-    # naive: filter by title/people/description occurrence
     q = query.lower()
     mask = (
-        df.get("movie_title","").str.lower().str.contains(q, na=False) |
-        df.get("directors","").str.lower().str.contains(q, na=False) |
-        df.get("actors","").str.lower().str.contains(q, na=False) |
-        df.get("description","").str.lower().str.contains(q, na=False)
+        df.get("movie_title", pd.Series(dtype=str)).str.lower().str.contains(q, na=False) |
+        df.get("directors", pd.Series(dtype=str)).str.lower().str.contains(q, na=False) |
+        df.get("actors", pd.Series(dtype=str)).str.lower().str.contains(q, na=False) |
+        df.get("description", pd.Series(dtype=str)).str.lower().str.contains(q, na=False)
     )
     out = df[mask].copy()
     if out.empty:
@@ -126,7 +157,7 @@ def retrieve(index_dir: str, query: str, k: int = 12) -> pd.DataFrame:
     out.insert(0, "final_score", 0.0)
     return out.head(k)
 
-# --------- RAG main ----------
+# ---------- RAG ----------
 def rag_answer(index_dir: str, query: str, k: int = 10,
                llm_backend: str = "openai", llm_model: str = "gpt-4o-mini") -> tuple[str, pd.DataFrame]:
     hits = retrieve(index_dir, query, k=max(k, 12))
@@ -138,7 +169,7 @@ def rag_answer(index_dir: str, query: str, k: int = 10,
         answer = "[No LLM backend configured]\n\n" + prompt
     return answer, hits
 
-# --------- CLI ----------
+# ---------- CLI ----------
 def cmd_answer(args):
     ans, hits = rag_answer(args.index, args.q, k=args.k, llm_backend=args.backend, llm_model=args.model)
     print("\n=== ANSWER ===\n")
@@ -147,21 +178,23 @@ def cmd_answer(args):
     cols = [c for c in ["movie_title","release_date","categories","actors","directors","page_url"] if c in hits.columns]
     print(hits.head(args.k)[cols].to_string(index=False, max_colwidth=120))
 
-# --------- Streamlit ----------
+# ---------- Streamlit UI ----------
 def cmd_app(args):
     import streamlit as st
-    st.caption("build: 2025-10-02T20:45Z")
-    if not _get_api_key():
-    st.warning("OPENAI_API_KEY не найден — интерфейс загружен, генерация отключена (пока).")
     st.set_page_config(page_title="RAG over Movies", layout="wide")
     st.title("🧠 RAG по фильмам (поверх гибридного поиска)")
 
     index_dir = st.sidebar.text_input("Папка индекса", args.index or "./index_hybrid")
     k = st.sidebar.slider("Top-K документов", 5, 20, 10)
-    llm_model = st.sidebar.selectbox("LLM модель", ["gpt-4o-mini","gpt-4o","gpt-4.1-mini","gpt-4.1"], index=0)
+    llm_model = st.sidebar.selectbox("LLM модель", ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"], index=0)
+
+    has_key = bool(_get_api_key())
+    if not has_key:
+        st.warning("OPENAI_API_KEY не найден — интерфейс загрузится, но генерация отключена. "
+                   "В Streamlit Cloud добавьте секрет OPENAI_API_KEY в Settings → Secrets.")
 
     q = st.text_input("Ваш запрос", "романтическая комедия в большом городе")
-    if st.button("Спросить"):
+    if st.button("Спросить", disabled=not has_key) and q.strip():
         with st.spinner("Готовим ответ…"):
             ans, hits = rag_answer(index_dir, q, k=k, llm_backend="openai", llm_model=llm_model)
         st.markdown("### Ответ")
@@ -171,7 +204,9 @@ def cmd_app(args):
         cols = [c for c in ["movie_title","release_date","categories","actors","directors","description","page_url"] if c in hits.columns]
         st.dataframe(hits[cols], use_container_width=True)
 
-# --------- main ----------
+    st.caption("build: 2025-10-02T18:45Z")
+
+# ---------- main ----------
 def main():
     ap = argparse.ArgumentParser(description="RAG over movie search")
     sub = ap.add_subparsers(dest="cmd")
@@ -190,9 +225,11 @@ def main():
 
     args, _ = ap.parse_known_args()
     if args.cmd is None:
+        # Если запущено через streamlit run, передаём управление UI
         if any(x.endswith("streamlit") or x == "streamlit" for x in sys.argv[0:2]):
             args = argparse.Namespace(cmd="app", index="./index_hybrid")
-            cmd_app(args); return
+            cmd_app(args)
+            return
         ap.print_help(); sys.exit(0)
     args.func(args)
 
