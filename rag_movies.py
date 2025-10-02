@@ -116,36 +116,6 @@ def _get_api_key():
             pass
     return key
 
-def call_openai(prompt: str, system: str = SYS_PROMPT, model: str = "gpt-4o-mini") -> str:
-    # сначала пробуем новый SDK (>=1.0)
-    try:
-        client = _make_client()
-        r = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": prompt}],
-            temperature=0.4,
-            max_tokens=900,
-        )
-        return r.choices[0].message.content.strip()
-    except Exception as e_new:
-        # фолбэк на старый SDK (0.x), если вдруг он в окружении
-        try:
-            import openai
-            key = _get_api_key()
-            if not key:
-                return "[LLM disabled] Set OPENAI_API_KEY to enable generation.\n\n" + prompt
-            openai.api_key = key
-            r = openai.ChatCompletion.create(
-                model=model,
-                messages=[{"role": "system", "content": system},
-                          {"role": "user", "content": prompt}],
-                temperature=0.4,
-                max_tokens=900,
-            )
-            return r["choices"][0]["message"]["content"].strip()
-        except Exception as e_old:
-            return f"[OpenAI error] {e_new or e_old}\n\n" + prompt
 
 
 
