@@ -150,6 +150,9 @@ def cmd_answer(args):
 # --------- Streamlit ----------
 def cmd_app(args):
     import streamlit as st
+    st.caption("build: 2025-10-02T20:45Z")
+    if not _get_api_key():
+    st.warning("OPENAI_API_KEY не найден — интерфейс загружен, генерация отключена (пока).")
     st.set_page_config(page_title="RAG over Movies", layout="wide")
     st.title("🧠 RAG по фильмам (поверх гибридного поиска)")
 
