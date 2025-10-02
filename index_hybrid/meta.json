@@ -1,0 +1,6 @@
+{
+  "metric": "cosine",
+  "use_faiss": false,
+  "dim": 768,
+  "model_name": "intfloat/multilingual-e5-base"
+}
