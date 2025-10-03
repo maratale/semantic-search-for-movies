@@ -2,34 +2,32 @@
 # -*- coding: utf-8 -*-
 
 """
-RAG over hybrid movie search, with poster cards in Streamlit.
+RAG over hybrid movie search — без бокового меню, с карточками постеров сразу в выдаче.
+
 - Берёт кандидатов из semantic_search_movies.run_query (ваш гибридный индекс).
 - Собирает компактный контекст (title, year, genres, cast, plot, url).
-- Вызывает LLM для связного ответа: резюме, рекомендации, связи.
-- В Streamlit рендерит карточки фильмов с постером (из poster_url или og:image по page_url).
+- Вызывает LLM (GPT-4o/*) для связного ответа.
+- В интерфейсе: поля ввода наверху, затем текстовый ответ и карточки фильмов с постерами.
 
 Запуск:
-  # CLI
-  python rag_movies.py answer --index ./index_hybrid --q "ромком в большом городе" --k 8
-
-  # Streamlit
   python -m streamlit run rag_movies.py -- app --index ./index_hybrid
 
+Требуется:
+  pip install streamlit requests
+  (опционально) pip install beautifulsoup4  # чтобы вытягивать og:image с page_url
+
 Переменные окружения:
-  OPENAI_API_KEY — для OpenAI backend (в Streamlit Cloud положите в Secrets).
+  OPENAI_API_KEY — ключ OpenAI (в Streamlit Cloud положите в Secrets).
 """
 
-print("RAG build stamp: 2025-10-03T12:00Z")
-
 import os, sys, argparse
-import pandas as pd
 from typing import Optional
+import pandas as pd
 
 # ---------- API key & client ----------
-def _get_api_key() -> str | None:
+def _get_api_key() -> Optional[str]:
     key = os.getenv("OPENAI_API_KEY")
     if not key:
-        # В Streamlit Cloud ключ можно хранить в Secrets
         try:
             import streamlit as st
             key = st.secrets.get("OPENAI_API_KEY", None) if hasattr(st, "secrets") else None
@@ -41,17 +39,16 @@ def _make_client():
     key = _get_api_key()
     if not key:
         raise RuntimeError("OPENAI_API_KEY is not set (env or Streamlit secrets).")
-    # Импорт внутри функции, чтобы модуль грузился даже без openai
     from openai import OpenAI
     return OpenAI(api_key=key)
 
 # ---------- Импорт ретривера ----------
 try:
-    import semantic_search_movies as retr  # ожидается функция run_query(out_dir, query, k)
+    import semantic_search_movies as retr  # ожидается run_query(out_dir, query, k)
 except Exception:
     retr = None
 
-# ---------- Вспомогательные ----------
+# ---------- Утилиты контекста ----------
 def _shorten(s: str, n: int = 550) -> str:
     s = (s or "").strip()
     return s if len(s) <= n else s[:n].rsplit(" ", 1)[0] + "…"
@@ -106,19 +103,19 @@ USER_PROMPT_TMPL = """Запрос пользователя:
 
 # ---------- Вызов LLM ----------
 def call_openai(prompt: str, system: str = SYS_PROMPT, model: str = "gpt-4o-mini") -> str:
-    # основной путь: новый SDK (openai>=1.x)
+    # основной путь — новый SDK
     try:
         client = _make_client()
         r = client.chat.completions.create(
             model=model,
             messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": prompt}],
+                      {"role": "user",   "content": prompt}],
             temperature=0.4,
             max_tokens=900,
         )
         return r.choices[0].message.content.strip()
     except Exception as e_new:
-        # фолбэк: старый SDK (openai 0.x), если он внезапно в окружении
+        # фолбэк на старый SDK, если вдруг
         try:
             import openai
             key = _get_api_key()
@@ -128,7 +125,7 @@ def call_openai(prompt: str, system: str = SYS_PROMPT, model: str = "gpt-4o-mini
             r = openai.ChatCompletion.create(
                 model=model,
                 messages=[{"role": "system", "content": system},
-                          {"role": "user", "content": prompt}],
+                          {"role": "user",   "content": prompt}],
                 temperature=0.4,
                 max_tokens=900,
             )
@@ -139,9 +136,8 @@ def call_openai(prompt: str, system: str = SYS_PROMPT, model: str = "gpt-4o-mini
 # ---------- Ретривер-обёртка ----------
 def retrieve(index_dir: str, query: str, k: int = 12) -> pd.DataFrame:
     if retr and hasattr(retr, "run_query"):
-        # ожидается сигнатура run_query(out_dir, query, k=...)
         return retr.run_query(index_dir, query, k=k)
-    # fallback: очень простой поиск по подстроке, если индекс не собран/нет зависимостей
+    # fallback: очень простой матч по подстроке (если индекс не собран)
     meta_path = os.path.join(index_dir, "meta.parquet")
     if not os.path.exists(meta_path):
         raise FileNotFoundError(f"No meta.parquet in {index_dir}; build your index first.")
@@ -149,8 +145,8 @@ def retrieve(index_dir: str, query: str, k: int = 12) -> pd.DataFrame:
     q = query.lower()
     mask = (
         df.get("movie_title", pd.Series(dtype=str)).str.lower().str.contains(q, na=False) |
-        df.get("directors", pd.Series(dtype=str)).str.lower().str.contains(q, na=False) |
-        df.get("actors", pd.Series(dtype=str)).str.lower().str.contains(q, na=False) |
+        df.get("directors",   pd.Series(dtype=str)).str.lower().str.contains(q, na=False) |
+        df.get("actors",      pd.Series(dtype=str)).str.lower().str.contains(q, na=False) |
         df.get("description", pd.Series(dtype=str)).str.lower().str.contains(q, na=False)
     )
     out = df[mask].copy()
@@ -224,53 +220,59 @@ def cmd_answer(args):
     cols = [c for c in ["movie_title","release_date","categories","actors","directors","page_url"] if c in hits.columns]
     print(hits.head(args.k)[cols].to_string(index=False, max_colwidth=120))
 
-# ---------- Streamlit UI ----------
+# ---------- Streamlit UI (без бокового меню) ----------
 def cmd_app(args):
     import streamlit as st
     st.set_page_config(page_title="RAG over Movies", layout="wide")
-    st.title("🧠 RAG по фильмам (поверх гибридного поиска)")
+    st.title("🧠 RAG по фильмам (гибридный поиск + LLM)")
 
-    index_dir = st.sidebar.text_input("Папка индекса", args.index or "./index_hybrid")
-    k = st.sidebar.slider("Top-K документов", 5, 20, 10)
-    llm_model = st.sidebar.selectbox("LLM модель", ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"], index=0)
+    # Панель настроек сверху (НЕ sidebar)
+    with st.container():
+        col1, col2, col3, col4, col5 = st.columns([2, 1, 1, 1, 1])
+        with col1:
+            index_dir = st.text_input("Папка индекса", args.index or "./index_hybrid")
+        with col2:
+            k = st.number_input("Top-K", min_value=5, max_value=20, value=10, step=1)
+        with col3:
+            llm_model = st.selectbox("LLM-модель", ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"], index=0)
+        with col4:
+            img_w = st.number_input("Ширина постера (px)", min_value=120, max_value=360, value=200, step=10)
+        with col5:
+            allow_fetch = st.checkbox("og:image из page_url", value=False, help="Если нет poster_url, пробуем мета-теги страницы")
 
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("**Постеры**")
-    img_w = st.sidebar.slider("Ширина постера, px", 120, 360, 200, step=10)
-    allow_fetch = st.sidebar.checkbox("Пробовать og:image из page_url", value=False,
-                                      help="Если в данных нет poster_url, попробуем вытащить изображение со страницы")
-    show_plot = st.sidebar.checkbox("Показывать описание", value=True)
+    show_plot = st.checkbox("Показывать описание", value=True)
 
     has_key = bool(_get_api_key())
     if not has_key:
-        st.warning("OPENAI_API_KEY не найден — интерфейс загрузится, но генерация отключена.\n"
-                   "В Streamlit Cloud добавьте секрет OPENAI_API_KEY в Settings → Secrets.")
-
-    @st.cache_data(show_spinner=False)
-    def cached_poster_from_page(url: str) -> Optional[str]:
-        resp = _safe_get(url)
-        if resp is None:
-            return None
-        og = _extract_og_image(resp.text)
-        return og if (og and _is_http_url(og)) else None
+        st.warning("OPENAI_API_KEY не найден — генерация ответа будет отключена.")
 
     q = st.text_input("Ваш запрос", "романтическая комедия в большом городе")
-    if st.button("Спросить", disabled=not has_key) and q.strip():
-        with st.spinner("Готовим ответ…"):
-            ans, hits = rag_answer(index_dir, q, k=k, llm_backend="openai", llm_model=llm_model)
-        st.markdown("### Ответ")
+    go = st.button("Найти и сформировать ответ", disabled=not has_key)
+
+    if go and q.strip():
+        with st.spinner("Ищем и формируем ответ…"):
+            ans, hits = rag_answer(index_dir, q, k=int(k), llm_backend="openai", llm_model=llm_model)
+
+        # Текстовый ответ
+        st.markdown("## Ответ")
         st.write(ans)
 
-        st.markdown("### Использованные документы (таблица)")
-        cols = [c for c in ["movie_title","release_date","categories","actors","directors","description","page_url","poster_url"] if c in hits.columns]
-        st.dataframe(hits[cols], use_container_width=True)
+        # Карточки фильмов сразу под ответом
+        st.markdown("## Подборка фильмов")
+        # локальный кэш внутри сессии
+        @st.cache_data(show_spinner=False)
+        def cached_poster_from_page(url: str) -> Optional[str]:
+            resp = _safe_get(url)
+            if resp is None:
+                return None
+            og = _extract_og_image(resp.text)
+            return og if (og and _is_http_url(og)) else None
 
-        st.markdown("### Карточки фильмов")
         for _, row in hits.iterrows():
             title = str(row.get("movie_title","(без названия)")).strip() or "(без названия)"
             meta_line = " | ".join(filter(None, [
-                str(row.get("categories","")) .strip(),
-                str(row.get("release_date","")) .strip(),
+                str(row.get("categories","")).strip(),
+                str(row.get("release_date","")).strip(),
             ]))
 
             # определить постер
@@ -290,11 +292,12 @@ def cmd_app(args):
 
             with col_img:
                 if poster:
-                    st.image(poster, width=img_w)
+                    st.image(poster, width=int(img_w))
                 else:
                     st.markdown(
-                        f"<div style='width:{img_w}px;height:{int(img_w*1.48)}px;background:#f3f3f3;"
-                        f"border:1px dashed #ccc;display:flex;align-items:center;justify-content:center;color:#888;'>"
+                        f"<div style='width:{int(img_w)}px;height:{int(int(img_w)*1.48)}px;"
+                        f"background:#f3f3f3;border:1px dashed #ccc;display:flex;"
+                        f"align-items:center;justify-content:center;color:#888;'>"
                         f"нет постера</div>", unsafe_allow_html=True)
 
             with col_txt:
@@ -315,20 +318,20 @@ def cmd_app(args):
                     if desc:
                         st.markdown(desc[:600] + ("…" if len(desc) > 600 else ""))
 
-                url = str(row.get("page_url","")) .strip()
+                url = str(row.get("page_url","")).strip()
                 if _is_http_url(url):
                     st.markdown(f"[Открыть страницу]({url})")
 
             st.divider()
 
-    st.caption("build: 2025-10-03T12:00Z")
+        st.caption("build: no-sidebar UI")
 
 # ---------- main ----------
 def main():
-    ap = argparse.ArgumentParser(description="RAG over movie search")
+    ap = argparse.ArgumentParser(description="RAG over movie search (no-sidebar UI)")
     sub = ap.add_subparsers(dest="cmd")
 
-    ap_a = sub.add_parser("answer", help="Ask a question and get a synthesized answer")
+    ap_a = sub.add_parser("answer", help="Ask a question and get a synthesized answer (CLI)")
     ap_a.add_argument("--index", required=True)
     ap_a.add_argument("--q", required=True)
     ap_a.add_argument("-k", type=int, default=10)
@@ -336,18 +339,15 @@ def main():
     ap_a.add_argument("--model", default="gpt-4o-mini")
     ap_a.set_defaults(func=cmd_answer)
 
-    ap_s = sub.add_parser("app", help="Run Streamlit UI")
+    ap_s = sub.add_parser("app", help="Run Streamlit UI (no sidebar)")
     ap_s.add_argument("--index", default="./index_hybrid")
     ap_s.set_defaults(func=cmd_app)
 
     args, _ = ap.parse_known_args()
 
-    # Если команд нет — запускаем UI с дефолтами.
     if args.cmd is None:
         args = argparse.Namespace(cmd="app", index="./index_hybrid")
-        cmd_app(args)
-        return
-
+        cmd_app(args); return
     args.func(args)
 
 if __name__ == "__main__":
