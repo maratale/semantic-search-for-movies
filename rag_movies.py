@@ -333,7 +333,7 @@ python -m streamlit run rag_movies.py -- app
 python semantic_search_movies.py build --csv cleaned_dataset.csv --out-dir ./index_hybrid
 """
 )
----------- main ----------
+#---------- main ----------
 def main():
 ap = argparse.ArgumentParser(description="RAG over movie search (two tabs)")
 sub = ap.add_subparsers(dest="cmd")
