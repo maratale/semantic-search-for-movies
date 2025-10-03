@@ -335,21 +335,21 @@ python semantic_search_movies.py build --csv cleaned_dataset.csv --out-dir ./ind
 )
 #---------- main ----------
 def main():
-ap = argparse.ArgumentParser(description="RAG over movie search (two tabs)")
-sub = ap.add_subparsers(dest="cmd")
-ap_a = sub.add_parser("answer", help="Ask via CLI and print answer")
-ap_a.add_argument("--q", required=True)
-ap_a.add_argument("-k", type=int, default=TOP_K)
-ap_a.set_defaults(func=cmd_answer)
+    ap = argparse.ArgumentParser(description="RAG over movie search (two tabs)")
+    sub = ap.add_subparsers(dest="cmd")
+    ap_a = sub.add_parser("answer", help="Ask via CLI and print answer")
+    ap_a.add_argument("--q", required=True)
+    ap_a.add_argument("-k", type=int, default=TOP_K)
+    ap_a.set_defaults(func=cmd_answer)
 
-ap_s = sub.add_parser("app", help="Run Streamlit UI")
-ap_s.set_defaults(func=cmd_app)
+    ap_s = sub.add_parser("app", help="Run Streamlit UI")
+    ap_s.set_defaults(func=cmd_app)
 
-args, _ = ap.parse_known_args()
-if args.cmd is None:
-    args = argparse.Namespace(cmd="app")
-    cmd_app(args)
-    return
-args.func(args)
+    args, _ = ap.parse_known_args()
+    if args.cmd is None:
+        args = argparse.Namespace(cmd="app")
+        cmd_app(args)
+        return
+    args.func(args)
 if name == "main":
-main()
+    main()
