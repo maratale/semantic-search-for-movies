@@ -210,7 +210,7 @@ def cmd_answer(args):
 def cmd_app(_args):
     import streamlit as st
     st.set_page_config(page_title="RAG over Movies", layout="wide")
-    st.title("🎬 RAG по фильмам")
+    st.title("🎬 Поиск фильмов по запросу пользователя")
 
     tabs = st.tabs(["Поиск", "О модели"])
 
@@ -219,7 +219,7 @@ def cmd_app(_args):
         if not _get_api_key():
             st.warning("OPENAI_API_KEY не найден — генерация ответа отключена.")
 
-        q = st.text_input("Поиск", "романтическая комедия в большом городе")
+        q = st.text_input("Поиск")
         go = st.button("Найти")
 
         @st.cache_data(show_spinner=False)
@@ -231,7 +231,7 @@ def cmd_app(_args):
             return og if (og and _is_http_url(og)) else None
 
         if go and q.strip():
-            with st.spinner("Ищем и формируем ответ…"):
+            with st.spinner("Ищем ваш фильм"):
                 ans, hits = rag_answer(INDEX_DIR, q, k=TOP_K)
 
             st.markdown("## Ответ")
@@ -324,13 +324,6 @@ def cmd_app(_args):
 
 **Производительность:**
 - До 100–300k фильмов — FAISS Flat на CPU.
-- Дальше — FAISS IVF/HNSW или Qdrant (если нужны фильтры/масштаб).
-
-**Запуск:**
-```bash
-python -m streamlit run rag_movies.py -- app
-# индексация (один раз):
-python semantic_search_movies.py build --csv cleaned_dataset.csv --out-dir ./index_hybrid
 """
 )
 # ---------- main ----------
