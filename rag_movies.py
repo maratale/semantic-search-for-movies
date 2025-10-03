@@ -2,25 +2,27 @@
 # -*- coding: utf-8 -*-
 
 """
-RAG over hybrid movie search — минимальный UI (виден только поиск и результат).
-- Берёт кандидатов из semantic_search_movies.run_query (ваш гибридный индекс).
-- Строит контекст и зовёт GPT-4o/mini.
-- Сразу под ответом показывает карточки фильмов с постерами.
+RAG over hybrid movie search — минимальный UI + вкладка «О модели».
+- Вкладка «Поиск»: поле запроса, ответ LLM и карточки фильмов с постерами.
+- Вкладка «О модели»: описание эмбеддингов, TF-IDF, гибридной смеси, RAG и обогащения.
+
+Запуск: python -m streamlit run rag_movies.py -- app
 """
 
-import os, sys, argparse
+import os
+import argparse
 from typing import Optional
 import pandas as pd
 import requests
 from urllib.parse import urlparse
 
-# ====== СКРЫТЫЕ НАСТРОЙКИ (менять тут, на экране их нет) =====================
+# ====== НЕОТОБРАЖАЕМЫЕ НАСТРОЙКИ ============================================
 INDEX_DIR   = "./index_hybrid"
 TOP_K       = 10
 LLM_MODEL   = "gpt-4o-mini"
 IMG_WIDTH   = 200         # px
 ALLOW_OGIMG = False       # True — пытаться брать og:image с page_url
-SHOW_PLOT   = True        # показывать описание в карточке
+SHOW_PLOT   = True        # показывать описание
 # ============================================================================
 
 # ---------- API key & client ----------
@@ -54,7 +56,8 @@ def _shorten(s: str, n: int = 550) -> str:
 
 def _as_year(x) -> str:
     s = str(x or "").strip()
-    for ch in "[](){}": s = s.replace(ch, "")
+    for ch in "[](){}":
+        s = s.replace(ch, "")
     y = "".join(c for c in s if c.isdigit())
     return y[:4] if len(y) >= 4 else s
 
@@ -87,7 +90,13 @@ SYS_PROMPT = (
     "Всегда указывай год, жанры, можно актёров/режиссёров; добавляй ссылки, если есть.\n"
 )
 
-USER_PROMPT_TMPL = "Запрос пользователя:\n{query}\n\nКонтекст (кандидаты фильмов):\n{context}\n\nТвоя задача: на основе контекста выбрать максимально релевантные фильмы, объяснить выбор и связать их с запросом.\nЕсли контекст не покрывает запрос, честно скажи это и предложи ближайшие варианты из контекста.\n"
+USER_PROMPT_TMPL = (
+    "Запрос пользователя:\n{query}\n\n"
+    "Контекст (кандидаты фильмов):\n{context}\n\n"
+    "Твоя задача: на основе контекста выбрать максимально релевантные фильмы, "
+    "объяснить выбор и связать их с запросом. Если контекст не покрывает запрос, "
+    "честно скажи это и предложи ближайшие варианты из контекста.\n"
+)
 
 # ---------- LLM ----------
 def call_openai(prompt: str, system: str = SYS_PROMPT, model: str = LLM_MODEL) -> str:
@@ -105,7 +114,8 @@ def call_openai(prompt: str, system: str = SYS_PROMPT, model: str = LLM_MODEL) -
         try:
             import openai
             key = _get_api_key()
-            if not key: return f"[LLM disabled] {e_new}\n\n" + prompt
+            if not key:
+                return f"[LLM disabled] {e_new}\n\n" + prompt
             openai.api_key = key
             r = openai.ChatCompletion.create(
                 model=model,
@@ -134,11 +144,12 @@ def retrieve(index_dir: str, query: str, k: int = TOP_K) -> pd.DataFrame:
         df.get("description", pd.Series(dtype=str)).str.lower().str.contains(q, na=False)
     )
     out = df[mask].copy()
-    if out.empty: out = df.sample(min(k, len(df)), random_state=42).copy()
+    if out.empty:
+        out = df.sample(min(k, len(df)), random_state=42).copy()
     out.insert(0, "final_score", 0.0)
     return out.head(k)
 
-def rag_answer(index_dir: str, query: str, k: int = TOP_K) -> tuple[str, pd.DataFrame]:
+def rag_answer(index_dir: str, query: str, k: int = TOP_K):
     hits = retrieve(index_dir, query, k=max(k, 12))
     ctx  = _build_context(hits, k=max(k, 12))
     prompt = USER_PROMPT_TMPL.format(query=query, context=ctx)
@@ -172,7 +183,8 @@ def _safe_get(url: str, timeout: float = 5.0) -> Optional[requests.Response]:
     return None
 
 def _extract_og_image(html: str) -> Optional[str]:
-    if not HAS_BS4: return None
+    if not HAS_BS4:
+        return None
     try:
         soup = BeautifulSoup(html, "html.parser")
         for prop in ("og:image", "twitter:image", "og:image:url"):
@@ -188,104 +200,156 @@ def _extract_og_image(html: str) -> Optional[str]:
 # ---------- CLI ----------
 def cmd_answer(args):
     ans, hits = rag_answer(INDEX_DIR, args.q, k=args.k)
-    print("\n=== ANSWER ===\n"); print(ans)
+    print("\n=== ANSWER ===\n")
+    print(ans)
     print("\n=== SOURCES ===\n")
     cols = [c for c in ["movie_title","release_date","categories","actors","directors","page_url"] if c in hits.columns]
     print(hits.head(args.k)[cols].to_string(index=False, max_colwidth=120))
 
-# ---------- Streamlit (без видимых настроек) ----------
+# ---------- Streamlit (две вкладки, без сайдбара) ----------
 def cmd_app(_args):
     import streamlit as st
     st.set_page_config(page_title="RAG over Movies", layout="wide")
-    st.title("Поиск фильмов по запросу 🎬")
+    st.title("🎬 RAG по фильмам")
 
-    if not _get_api_key():
-        st.warning("OPENAI_API_KEY не найден — генерация ответа отключена.")
+    tabs = st.tabs(["Поиск", "О модели"])
 
-    q = st.text_input("Поиск")
-    go = st.button("Найти")
+    # --- вкладка «Поиск» ---
+    with tabs[0]:
+        if not _get_api_key():
+            st.warning("OPENAI_API_KEY не найден — генерация ответа отключена.")
 
-    @st.cache_data(show_spinner=False)
-    def cached_poster_from_page(url: str) -> Optional[str]:
-        resp = _safe_get(url)
-        if resp is None: return None
-        og = _extract_og_image(resp.text)
-        return og if (og and _is_http_url(og)) else None
+        q = st.text_input("Поиск", "романтическая комедия в большом городе")
+        go = st.button("Найти")
 
-    if go and q.strip():
-        with st.spinner("Ищем ваш фильм"):
-            ans, hits = rag_answer(INDEX_DIR, q, k=TOP_K)
+        @st.cache_data(show_spinner=False)
+        def cached_poster_from_page(url: str) -> Optional[str]:
+            resp = _safe_get(url)
+            if resp is None:
+                return None
+            og = _extract_og_image(resp.text)
+            return og if (og and _is_http_url(og)) else None
 
-        st.markdown("## Ответ")
-        st.write(ans)
+        if go and q.strip():
+            with st.spinner("Ищем и формируем ответ…"):
+                ans, hits = rag_answer(INDEX_DIR, q, k=TOP_K)
 
-        st.markdown("## Подборка фильмов")
-        for _, row in hits.iterrows():
-            title = str(row.get("movie_title","(без названия)")).strip() or "(без названия)"
-            meta_line = " | ".join(filter(None, [
-                str(row.get("categories","")).strip(),
-                str(row.get("release_date","")).strip(),
-            ]))
+            st.markdown("## Ответ")
+            st.write(ans)
 
-            # постер
-            poster = None
-            for key in ("poster_url","image_url","poster","thumbnail"):
-                val = _clean_url(row.get(key, ""))
-                if _is_http_url(val):
-                    poster = val; break
-            if poster is None and ALLOW_OGIMG:
-                page_url = _clean_url(row.get("page_url",""))
-                if _is_http_url(page_url):
-                    poster = cached_poster_from_page(page_url)
+            st.markdown("## Подборка фильмов")
+            for _, row in hits.iterrows():
+                title = str(row.get("movie_title","(без названия)")).strip() or "(без названия)"
+                meta_line = " | ".join(filter(None, [
+                    str(row.get("categories","")).strip(),
+                    str(row.get("release_date","")).strip(),
+                ]))
 
-            box = st.container()
-            col_img, col_txt = box.columns([1,3], vertical_alignment="center")
+                # постер
+                poster = None
+                for key in ("poster_url","image_url","poster","thumbnail"):
+                    val = _clean_url(row.get(key, ""))
+                    if _is_http_url(val):
+                        poster = val
+                        break
+                if poster is None and ALLOW_OGIMG:
+                    page_url = _clean_url(row.get("page_url",""))
+                    if _is_http_url(page_url):
+                        poster = cached_poster_from_page(page_url)
 
-            with col_img:
-                if poster:
-                    st.image(poster, width=IMG_WIDTH)
-                else:
-                    st.markdown(
-                        f"<div style='width:{IMG_WIDTH}px;height:{int(IMG_WIDTH*1.48)}px;"
-                        f"background:#f3f3f3;border:1px dashed #ccc;display:flex;"
-                        f"align-items:center;justify-content:center;color:#888;'>нет постера</div>",
-                        unsafe_allow_html=True)
+                box = st.container()
+                col_img, col_txt = box.columns([1,3], vertical_alignment="center")
 
-            with col_txt:
-                st.markdown(f"**{title}**")
-                if meta_line: st.markdown(meta_line)
+                with col_img:
+                    if poster:
+                        st.image(poster, width=IMG_WIDTH)
+                    else:
+                        st.markdown(
+                            f"<div style='width:{IMG_WIDTH}px;height:{int(IMG_WIDTH*1.48)}px;"
+                            f"background:#f3f3f3;border:1px dashed #ccc;display:flex;"
+                            f"align-items:center;justify-content:center;color:#888;'>нет постера</div>",
+                            unsafe_allow_html=True)
 
-                people = []
-                if (row.get("actors") or "").strip():    people.append(f"**Актёры:** {row['actors']}")
-                if (row.get("directors") or "").strip(): people.append(f"**Режиссёры:** {row['directors']}")
-                if people: st.markdown("  \n".join(people))
+                with col_txt:
+                    st.markdown(f"**{title}**")
+                    if meta_line:
+                        st.markdown(meta_line)
 
-                if SHOW_PLOT:
-                    desc = (row.get("description") or "").strip()
-                    if desc: st.markdown(desc[:600] + ("…" if len(desc) > 600 else ""))
+                    people = []
+                    if (row.get("actors") or "").strip():
+                        people.append(f"**Актёры:** {row['actors']}")
+                    if (row.get("directors") or "").strip():
+                        people.append(f"**Режиссёры:** {row['directors']}")
+                    if people:
+                        st.markdown("  \n".join(people))
 
-                url = str(row.get("page_url","")).strip()
-                if _is_http_url(url): st.markdown(f"[Открыть страницу]({url})")
+                    if SHOW_PLOT:
+                        desc = (row.get("description") or "").strip()
+                        if desc:
+                            st.markdown(desc[:600] + ("…" if len(desc) > 600 else ""))
 
-            st.divider()
+                    url = str(row.get("page_url","")).strip()
+                    if _is_http_url(url):
+                        st.markdown(f"[Открыть страницу]({url})")
 
-# ---------- main ----------
+                st.divider()
+
+    # --- вкладка «О модели» ---
+    with tabs[1]:
+        st.markdown("## Как это работает")
+        st.markdown(
+            """
+**Стек:**
+- Эмбеддинги: `intfloat/multilingual-e5-base` (768-D). Префиксы: `passage:` для документов, `query:` для запросов; L2-норма → cosine = inner product.
+- Поиск: первичный ANN через FAISS (или sklearn fallback), широкий top-*k0*.
+- TF-IDF: три канала — `title`, `text` (название|описание|жанры|люди|дата), `people` (actors+directors).
+- Эвристики: `title_boost` (точное/префиксное/overlap/fuzzy), `people_direct_hit`.
+- Гибридная смесь сигналов (min–max по k0):
+  - **персональные запросы (имя/фамилия):** `0.35*sbert + 0.20*title + 0.05*text + 0.25*people + 0.15*direct`
+  - **общие запросы:** `0.45*sbert + 0.25*title + 0.10*text + 0.10*people + 0.10*title_boost`
+- RAG: топ-кандидаты → компактный контекст → GPT-4o-mini формирует ответ и объяснения.
+
+**Пайплайн:**
+1. CSV → нормализация полей → `search_text`, `people_text`.
+2. E5(`passage:`) → `embeddings.npy`; TF-IDF матрицы по каналам.
+3. Запрос → alias-расширение → E5(`query:`) → ANN top-k0.
+4. На k0 считаем TF-IDF и бусты → нормализация → смесь → финальный top-k.
+5. RAG собирает контекст (title/year/genres/cast/plot/url) и генерирует структурированный ответ.
+
+**Алиасы:** триггеры на популярные франшизы/персоны (HP/LOTR/Marvel/Тарантино); расширяемо.
+
+**Обогащение (опц.):**
+- Оффлайн-скрипт через GPT-4o-mini извлекает `themes`, `tropes`, `mood`, `setting`, `keywords_ru/en`, `alt_titles`, `entities` (строгий JSON).
+- Эти поля можно добавить в `search_text`/`topics_text` + новый TF-IDF канал; для эмбеддингов — сложить `E5(base)+E5(enriched)` и перенормировать.
+
+**Производительность:**
+- До 100–300k фильмов — FAISS Flat на CPU.
+- Дальше — FAISS IVF/HNSW или Qdrant (если нужны фильтры/масштаб).
+
+**Запуск:**
+```bash
+python -m streamlit run rag_movies.py -- app
+# индексация (один раз):
+python semantic_search_movies.py build --csv cleaned_dataset.csv --out-dir ./index_hybrid
+"""
+)
+---------- main ----------
 def main():
-    ap = argparse.ArgumentParser(description="RAG over movie search (minimal UI)")
-    sub = ap.add_subparsers(dest="cmd")
+ap = argparse.ArgumentParser(description="RAG over movie search (two tabs)")
+sub = ap.add_subparsers(dest="cmd")
+ap_a = sub.add_parser("answer", help="Ask via CLI and print answer")
+ap_a.add_argument("--q", required=True)
+ap_a.add_argument("-k", type=int, default=TOP_K)
+ap_a.set_defaults(func=cmd_answer)
 
-    ap_a = sub.add_parser("answer", help="Ask via CLI and print answer")
-    ap_a.add_argument("--q", required=True)
-    ap_a.add_argument("-k", type=int, default=TOP_K)
-    ap_a.set_defaults(func=cmd_answer)
+ap_s = sub.add_parser("app", help="Run Streamlit UI")
+ap_s.set_defaults(func=cmd_app)
 
-    ap_s = sub.add_parser("app", help="Run Streamlit UI")
-    ap_s.set_defaults(func=cmd_app)
-
-    args, _ = ap.parse_known_args()
-    if args.cmd is None:
-        args = argparse.Namespace(cmd="app"); cmd_app(args); return
-    args.func(args)
-
-if __name__ == "__main__":
-    main()
+args, _ = ap.parse_known_args()
+if args.cmd is None:
+    args = argparse.Namespace(cmd="app")
+    cmd_app(args)
+    return
+args.func(args)
+if name == "main":
+main()
