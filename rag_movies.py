@@ -333,10 +333,11 @@ python -m streamlit run rag_movies.py -- app
 python semantic_search_movies.py build --csv cleaned_dataset.csv --out-dir ./index_hybrid
 """
 )
-#---------- main ----------
+# ---------- main ----------
 def main():
     ap = argparse.ArgumentParser(description="RAG over movie search (two tabs)")
     sub = ap.add_subparsers(dest="cmd")
+
     ap_a = sub.add_parser("answer", help="Ask via CLI and print answer")
     ap_a.add_argument("--q", required=True)
     ap_a.add_argument("-k", type=int, default=TOP_K)
@@ -351,5 +352,6 @@ def main():
         cmd_app(args)
         return
     args.func(args)
-if name == "main":
+
+if __name__ == "__main__":
     main()
