@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-RAG over hybrid movie search.
+RAG over hybrid movie search, with poster cards in Streamlit.
 - Берёт кандидатов из semantic_search_movies.run_query (ваш гибридный индекс).
 - Собирает компактный контекст (title, year, genres, cast, plot, url).
 - Вызывает LLM для связного ответа: резюме, рекомендации, связи.
+- В Streamlit рендерит карточки фильмов с постером (из poster_url или og:image по page_url).
 
 Запуск:
   # CLI
@@ -18,10 +19,11 @@ RAG over hybrid movie search.
   OPENAI_API_KEY — для OpenAI backend (в Streamlit Cloud положите в Secrets).
 """
 
-print("RAG build stamp: 2025-10-02T18:45Z")
+print("RAG build stamp: 2025-10-03T12:00Z")
 
 import os, sys, argparse
 import pandas as pd
+from typing import Optional
 
 # ---------- API key & client ----------
 def _get_api_key() -> str | None:
@@ -169,6 +171,50 @@ def rag_answer(index_dir: str, query: str, k: int = 10,
         answer = "[No LLM backend configured]\n\n" + prompt
     return answer, hits
 
+# ---------- Постеры: утилиты ----------
+import requests
+from urllib.parse import urlparse
+try:
+    from bs4 import BeautifulSoup
+    HAS_BS4 = True
+except Exception:
+    HAS_BS4 = False
+
+def _is_http_url(s: str) -> bool:
+    try:
+        u = urlparse(str(s).strip())
+        return u.scheme in ("http", "https") and bool(u.netloc)
+    except Exception:
+        return False
+
+def _clean_url(s: str) -> str:
+    return str(s or "").strip()
+
+def _safe_get(url: str, timeout: float = 5.0) -> Optional[requests.Response]:
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; RAGMoviesBot/1.0)"}
+        r = requests.get(url, headers=headers, timeout=timeout)
+        if r.status_code == 200 and r.content:
+            return r
+    except Exception:
+        pass
+    return None
+
+def _extract_og_image(html: str) -> Optional[str]:
+    if not HAS_BS4:
+        return None
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        for prop in ("og:image", "twitter:image", "og:image:url"):
+            tag = soup.find("meta", attrs={"property": prop}) or soup.find("meta", attrs={"name": prop})
+            if tag:
+                content = tag.get("content") or tag.get("value")
+                if content and _is_http_url(content):
+                    return content
+    except Exception:
+        pass
+    return None
+
 # ---------- CLI ----------
 def cmd_answer(args):
     ans, hits = rag_answer(args.index, args.q, k=args.k, llm_backend=args.backend, llm_model=args.model)
@@ -188,10 +234,25 @@ def cmd_app(args):
     k = st.sidebar.slider("Top-K документов", 5, 20, 10)
     llm_model = st.sidebar.selectbox("LLM модель", ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"], index=0)
 
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Постеры**")
+    img_w = st.sidebar.slider("Ширина постера, px", 120, 360, 200, step=10)
+    allow_fetch = st.sidebar.checkbox("Пробовать og:image из page_url", value=False,
+                                      help="Если в данных нет poster_url, попробуем вытащить изображение со страницы")
+    show_plot = st.sidebar.checkbox("Показывать описание", value=True)
+
     has_key = bool(_get_api_key())
     if not has_key:
-        st.warning("OPENAI_API_KEY не найден — интерфейс загрузится, но генерация отключена. "
+        st.warning("OPENAI_API_KEY не найден — интерфейс загрузится, но генерация отключена.\n"
                    "В Streamlit Cloud добавьте секрет OPENAI_API_KEY в Settings → Secrets.")
+
+    @st.cache_data(show_spinner=False)
+    def cached_poster_from_page(url: str) -> Optional[str]:
+        resp = _safe_get(url)
+        if resp is None:
+            return None
+        og = _extract_og_image(resp.text)
+        return og if (og and _is_http_url(og)) else None
 
     q = st.text_input("Ваш запрос", "романтическая комедия в большом городе")
     if st.button("Спросить", disabled=not has_key) and q.strip():
@@ -200,13 +261,68 @@ def cmd_app(args):
         st.markdown("### Ответ")
         st.write(ans)
 
-        st.markdown("### Использованные документы")
-        cols = [c for c in ["movie_title","release_date","categories","actors","directors","description","page_url"] if c in hits.columns]
+        st.markdown("### Использованные документы (таблица)")
+        cols = [c for c in ["movie_title","release_date","categories","actors","directors","description","page_url","poster_url"] if c in hits.columns]
         st.dataframe(hits[cols], use_container_width=True)
 
-    st.caption("build: 2025-10-02T18:45Z")
+        st.markdown("### Карточки фильмов")
+        for _, row in hits.iterrows():
+            title = str(row.get("movie_title","(без названия)")).strip() or "(без названия)"
+            meta_line = " | ".join(filter(None, [
+                str(row.get("categories","")) .strip(),
+                str(row.get("release_date","")) .strip(),
+            ]))
 
-# ---------- main ----------
+            # определить постер
+            poster = None
+            for key in ("poster_url","image_url","poster","thumbnail"):
+                val = _clean_url(row.get(key, ""))
+                if _is_http_url(val):
+                    poster = val
+                    break
+            if poster is None and allow_fetch:
+                page_url = _clean_url(row.get("page_url",""))
+                if _is_http_url(page_url):
+                    poster = cached_poster_from_page(page_url)
+
+            box = st.container()
+            col_img, col_txt = box.columns([1,3], vertical_alignment="center")
+
+            with col_img:
+                if poster:
+                    st.image(poster, width=img_w)
+                else:
+                    st.markdown(
+                        f"<div style='width:{img_w}px;height:{int(img_w*1.48)}px;background:#f3f3f3;"
+                        f"border:1px dashed #ccc;display:flex;align-items:center;justify-content:center;color:#888;'>"
+                        f"нет постера</div>", unsafe_allow_html=True)
+
+            with col_txt:
+                st.markdown(f"**{title}**")
+                if meta_line:
+                    st.markdown(meta_line)
+
+                people = []
+                if (row.get("actors") or "").strip():
+                    people.append(f"**Актёры:** {row['actors']}")
+                if (row.get("directors") or "").strip():
+                    people.append(f"**Режиссёры:** {row['directors']}")
+                if people:
+                    st.markdown("  \n".join(people))
+
+                if show_plot:
+                    desc = (row.get("description") or "").strip()
+                    if desc:
+                        st.markdown(desc[:600] + ("…" if len(desc) > 600 else ""))
+
+                url = str(row.get("page_url","")) .strip()
+                if _is_http_url(url):
+                    st.markdown(f"[Открыть страницу]({url})")
+
+            st.divider()
+
+    st.caption("build: 2025-10-03T12:00Z")
+
 # ---------- main ----------
 def main():
     ap = argparse.ArgumentParser(description="RAG over movie search")
@@ -226,7 +342,7 @@ def main():
 
     args, _ = ap.parse_known_args()
 
-    # ВАЖНО: если команд нет — всегда запускаем UI с дефолтами.
+    # Если команд нет — запускаем UI с дефолтами.
     if args.cmd is None:
         args = argparse.Namespace(cmd="app", index="./index_hybrid")
         cmd_app(args)
@@ -236,4 +352,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
