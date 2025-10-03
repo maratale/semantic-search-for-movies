@@ -318,7 +318,7 @@ def cmd_app(_args):
 
 **Алиасы:** триггеры на популярные франшизы/персоны (HP/LOTR/Marvel/Тарантино); расширяемо.
 
-**Обогащение (опц.):**
+**Обогащение:**
 - Оффлайн-скрипт через GPT-4o-mini извлекает `themes`, `tropes`, `mood`, `setting`, `keywords_ru/en`, `alt_titles`, `entities` (строгий JSON).
 - Эти поля можно добавить в `search_text`/`topics_text` + новый TF-IDF канал; для эмбеддингов — сложить `E5(base)+E5(enriched)` и перенормировать.
 
